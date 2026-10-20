@@ -1,197 +1,167 @@
-# Explainable Data Lifecycle Control Plane
+# Smart Data Control Plane
 
-A compact, production-grade **Data Lifecycle Control Plane** that manages the lifecycle of objects stored in AWS S3. It demonstrates asynchronous state management, explainable decision-making, and scalable batch orchestration — with a strict **control plane / data plane separation** so no object payload ever traverses the API.
+A production-inspired reference project for application-aware object lifecycle governance. The target system uses PostgreSQL to store searchable business metadata and durable intent, executes archive and restore operations against S3-compatible storage, and reconciles catalog state with actual object bytes.
 
-> Clean-room, public-safe, non-confidential. Inspired by general production experience operating enterprise data-lifecycle systems.
+**The control plane decides. Object storage executes. The reconciler verifies.**
 
----
+**Current status: foundation only.** The repository contains infrastructure, models, migrations, a Celery bootstrap, and foundation tests. Upload, policy evaluation, archive/restore, reconciliation, and benchmarks are planned, not demonstrated capabilities. This is not a production-ready service.
 
-## Features
+The authoritative scope, reliability contract, and exit criteria are in [PLAN.md](PLAN.md).
 
-- **Data-Intensive** — Manages object metadata, access patterns, storage tiers, and bulk folder operations. Decouples control plane from data plane.
-- **Intelligent Systems** — An explainable, cost-aware policy engine that scores object coldness, size, access risk, and retrieval-cost penalties; what-if simulation; optional scheduled enforcement.
-- **Dependable Systems** — Strict state machine, request- and task-level idempotency, bounded retries, checksum verification, audit logging, and a single-writer storage-class ownership model.
-- **Software Engineering** — FastAPI, Celery (+ beat), PostgreSQL, Redis, AWS S3, Docker Compose, Alembic, pytest, Ruff, GitHub Actions — delivered in phases with explicit exit criteria.
+## Problem and Evaluation
 
----
+Native storage lifecycle rules are useful for storage-level conditions. Application-aware decisions may also require workflow completion, application access history, legal holds, and remaining retention. A separate metadata catalog enables those decisions but introduces synchronization and operational costs.
 
-## Technology Stack
+**Engineering question:** Under what workload and failure conditions does an application-aware metadata control plane justify its additional consistency and operational overhead?
 
-| Layer | Tools |
-| :--- | :--- |
-| API & Logic | Python 3.12+, FastAPI, Pydantic, SQLAlchemy 2.0, Alembic |
-| Async Processing | Celery worker + beat, Redis broker |
-| Database | PostgreSQL |
-| Storage | AWS S3 via boto3 (additional checksums) |
-| Infra / Quality | Docker Compose, pytest, Ruff, GitHub Actions, moto/LocalStack |
+The core evaluation will test:
 
----
+- Whether selective indexed discovery justifies catalog maintenance, using equivalent-result baselines and measured write/index overhead.
+- Whether durable intent, idempotent execution, and reconciliation recover from specified interruptions without deleting the last verified copy.
 
-## Project Structure
+Negative results and limitations belong in the report. Cost modeling is a deferred extension, not evidence of measured financial savings.
+
+## Current Implementation and Target
+
+| Area | Existing foundation | Core-release target |
+| --- | --- | --- |
+| API | FastAPI service metadata and health endpoints | Verified upload/download, metadata discovery, lifecycle requests, operation status |
+| Persistence | PostgreSQL models and initial Alembic migration | Desired/observed state, immutable versions, durable operations, outbox, audit and findings |
+| Messaging | Celery with Redis; health task | RabbitMQ, confirmed publication, idempotent worker, bounded retries and dead-letter handling |
+| Storage | S3 configuration fields; no MinIO Compose service | MinIO staging namespace and private active/archive locations |
+| Policies | Model foundation | One seeded, deterministic, versioned policy with acceptance/rejection reasons |
+| Recovery | No lifecycle recovery workflow yet | Bounded reconciliation and documented failure-injection results |
+| Evidence | Configuration, enum/state-transition, and health test files | Real-service integration tests, recovery matrix, reproducible discovery benchmark |
+
+Milestone 1 migrates Redis to RabbitMQ and adds MinIO. The target will not maintain two broker paths, and PostgreSQL will be authoritative for operation status rather than a Celery result backend.
+
+## Target Architecture
 
 ```text
-.
-├── alembic/                  # Migrations (0001_initial_schema)
-│   ├── env.py
-│   └── versions/
-├── app/
-│   ├── main.py               # FastAPI app + health/readiness endpoints
-│   ├── config.py             # pydantic-settings configuration
-│   ├── celery_app.py         # Celery application factory
-│   ├── enums.py              # Storage/lifecycle/job enums + state machine
-│   ├── db/                   # Engine, session, declarative base
-│   ├── models/               # StorageObject, Job, FolderJob, Policy, AuditEvent
-│   ├── tasks/                # Celery tasks (health.ping, archive, restore, ...)
-│   └── wait_for_deps.py      # Postgres/Redis readiness gate
-├── docker/
-│   └── entrypoint.sh         # Migration + dependency-wait bootstrap
-├── tests/                    # Unit + integration tests
-├── docker-compose.yml        # api, worker, postgres, redis
-├── Dockerfile
-├── pyproject.toml
-└── PLAN.md                   # Authoritative phased specification
+Client --HTTP--> FastAPI --transactions--> PostgreSQL
+  |                                         |
+  +--presigned upload--> MinIO staging       +-- operations + outbox
+                                            |
+                                      outbox dispatcher
+                                            |
+                                         RabbitMQ
+                                            |
+                                     Celery worker
+                                      /          \
+                               MinIO active   MinIO archive
+
+Reconciler compares catalog intent, operation progress, and storage facts.
 ```
 
----
+This diagram describes the target, not the currently running Compose stack. Keep the existing single-codebase layout; domain policy and transition rules remain independent of adapters.
 
-## Getting Started
+### Planned reliability guarantees and limits
 
-### Prerequisites
+- Persist state changes, operation intent, audit events, and outbox messages in one PostgreSQL transaction. Expect at-least-once delivery, not exactly-once execution.
+- Bind each operation to an immutable object version and checksum. Reject conflicting reuse of an idempotency key.
+- Serialize mutations per object using database constraints and session advisory locks. Begin with one execution worker at concurrency 1; live takeover and distributed fencing are deferred.
+- Verify actual destination size and SHA-256 before deleting an archive source or declaring success. Verification reads stored bytes; it is not a zero-payload-through-worker design.
+- Restore returns the object to `ACTIVE` and intentionally retains the archive copy. Reconciliation must distinguish that replica from unexpected duplication.
+- Persist attempts and bounded retry deadlines; preserve exhausted failures and diagnostic dead-letter evidence.
+- Record discrepancies and repair only evidence-backed, authorized cases. Destructive ambiguity requires manual review.
 
-- Docker + Docker Compose
-- (Optional) `uv` for local development
+Worker timeout alone does not establish exclusive ownership. The core assumes controlled single-worker restart, settled in-flight requests, and bounded storage timeouts. See the full [reliability contract](PLAN.md#4-reliability-contract) before implementing recovery.
 
-### Run the full stack
+## Run the Existing Foundation
+
+Prerequisites: Docker with Docker Compose. Local development additionally requires Python 3.12+; `uv` is optional.
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-This starts:
-
-- `postgres:16` (port 5432)
-- `redis:7` (port 6379)
-- `api` (port 8000) — runs migrations on startup
-- `worker` — Celery worker consuming archive/restore jobs
-
-### Verify
+The current Compose configuration starts PostgreSQL 16, Redis 7, FastAPI, and a Celery worker with the health task registered. It does **not** provide MinIO, RabbitMQ, or a working lifecycle demonstration. The API container applies migrations at startup.
 
 ```bash
-curl http://localhost:8000/health          # liveness
-curl http://localhost:8000/health/ready    # readiness (DB + Redis)
+curl http://localhost:8000/
+curl http://localhost:8000/health
+curl http://localhost:8000/health/ready
 ```
 
-OpenAPI docs are served at `http://localhost:8000/docs`.
+OpenAPI documentation: <http://localhost:8000/docs>. Readiness currently checks PostgreSQL and Redis; it is not evidence of storage or lifecycle readiness.
 
----
+Treat this foundation as a trusted local development environment only. The current Compose file publishes service ports without loopback-only binding; restrict network access before starting it. Loopback binding and least-privilege storage permissions are planned baseline work, not existing protections.
 
-## Configuration
+### Current configuration
 
-All configuration is via environment variables — see `.env.example`.
+See [.env.example](.env.example) and [app/config.py](app/config.py). Keep real secrets outside Git.
 
-| Variable | Description |
-| :--- | :--- |
-| `DATABASE_URL` | SQLAlchemy PostgreSQL URL |
-| `REDIS_URL` | Redis broker/backend URL |
-| `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Optional Redis overrides |
-| `S3_REGION` / `S3_BUCKET` | S3 target |
-| `S3_ENDPOINT_URL` | Override for LocalStack/minio |
-| `ADMIN_API_KEY` | Static key required for `/v1/admin/*` |
-| `ENFORCEMENT_MODE` | `worker` (default) or `aws_lifecycle` |
+| Variable | Current purpose |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection URL |
+| `REDIS_URL` | Default Celery broker/backend and current readiness dependency |
+| `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` | Optional Celery URL overrides; readiness still checks Redis |
+| `S3_REGION`, `S3_BUCKET`, `S3_ENDPOINT_URL` | Storage configuration fields; workflows are not implemented |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Optional storage credentials; use local synthetic resources only |
+| `ADMIN_API_KEY` | Configuration field only; no admin endpoint enforcement is implemented |
 
----
+Do not interpret configuration fields as evidence that their associated features exist.
 
-## API Overview
+## API Status
 
-### Public (data operations)
+Currently implemented:
 
-- `POST /v1/uploads/initiate` — creates a `CREATED` object, returns a presigned PUT URL.
-- `POST /v1/uploads/{object_id}/complete` — verifies checksum/size, transitions to `ACTIVE`.
-- `GET /v1/objects/{object_id}/download` — presigned GET (or `409` for archived objects).
-- `POST /v1/objects/{object_id}/archive` · `restore` — create async job, return `202`.
-- `GET /v1/jobs/{job_id}` — poll job status.
-- `POST /v1/jobs/{job_id}/retry` — re-drive a `FAILED` job.
+```text
+GET /                 Service metadata
+GET /health           Process liveness
+GET /health/ready     PostgreSQL and Redis readiness
+```
 
-### Batch & admin (require `X-Admin-Key`)
+The planned core API adds upload initiation/completion, object lookup and cursor-paginated discovery, download, application-access recording, archive/restore requests, job status, an admin retry endpoint, and metrics. These routes are specified in [PLAN.md](PLAN.md#6-deterministic-policy-and-minimal-interfaces); they are not available yet.
 
-- `POST /v1/folders/archive` — prefix-scoped chunked fan-out.
-- `PUT /v1/admin/policies` — update versioned scoring policy.
-- `POST /v1/admin/policies/simulate` — what-if evaluation (no writes).
-- `POST /v1/admin/policies/apply` — project or apply S3 lifecycle configuration.
+Policy evaluation, outbox/retry dispatch, reconciliation, and finding inspection will start as bounded CLI commands rather than a large admin API.
 
-See `PLAN.md` §5 for full endpoint semantics and `PLAN.md` §6 for the explainable scoring model.
+## Delivery Milestones
 
----
+All four consolidated milestones remain planned. The existing foundation is a starting point, not a completed Milestone 1.
 
-## Development
+| Milestone | Required exit evidence | Status |
+| --- | --- | --- |
+| 1. Verified catalog round trip | RabbitMQ/MinIO setup; upload, checksum verification, query, download, duplicate handling, and restart persistence | Planned |
+| 2. One complete lifecycle | Explainable policy -> archive -> restore; durable intent, safe duplicates, concurrency guards, retry/dead-letter evidence | Planned |
+| 3. Recovery and demonstration | Bounded reconciliation, findings, minimal metrics, and documented outcomes for every failure-matrix case | Planned |
+| 4. Evaluation and public evidence | Clean-checkout demonstration, fair discovery benchmark, maintenance overhead, and reproducible results report | Planned |
+
+At each milestone, update implemented/tested/planned status, run the full available suite and required CI gates, and record commands, environment, outcomes, and limitations. Blocked integration tests do not satisfy exit criteria.
+
+**Core completion:** A new user can reproduce upload -> evaluate -> archive -> restore -> verify, recover from specified injected failures, and run a modest-scale benchmark.
+
+## Development and Checks
 
 ```bash
-# create a virtualenv and install dev dependencies
 uv venv --python 3.12
 uv pip install -e ".[dev]"
+source .venv/bin/activate
 
-# lint + format
 ruff check .
-ruff format .
-
-# run tests
+ruff format --check .
 pytest
 
-# run migrations against a local database
+# Requires the configured PostgreSQL instance.
 alembic upgrade head
 ```
 
-CI runs lint, format check, migrations, and tests on every push.
+Current tests cover configuration, enums/state transitions, and health behavior. They do not establish end-to-end lifecycle correctness.
 
----
+The existing [CI workflow](.github/workflows/ci.yml) configures lint, format checks, migration upgrade, and tests with coverage on pull requests and pushes to `main` or `feature/**`. This describes configured checks, not a claim that the latest run passed. Real-service lifecycle integration tests, failure injection, and dependency/container scanning remain planned gates.
 
-## Testing
+## Evidence and Limitations
 
-- **Unit** — state machine (including GLACIER_IR fast path, expiry sweeps, denied transitions), policy determinism, idempotency conflicts, cost model.
-- **Integration (moto/LocalStack)** — presigned initiate→complete→download round trip; archive/restore happy paths; duplicate commands; injected transient failures.
-- **CI** — Ruff, tests, migrations up/down, secret scan.
+The evaluation will compare indexed queries with a catalog baseline without the candidate index and with equivalent namespace enumeration at the same physical population. Enumeration must obtain equivalent business metadata, not merely list keys. Report request counts, selectivity, cache conditions, repeated latency measurements, and query plans alongside ingestion, verification, and reconciliation overhead.
 
----
+Begin with 100K logical catalog rows and a separately declared practical population of real small objects. Never present logical row counts as physically stored or processed capacity. No performance or recovery results are claimed here yet.
 
-## Phased Delivery Plan
+Two MinIO buckets demonstrate lifecycle orchestration, not Glacier retrieval behavior or actual archival pricing. Optional economic scenarios must include retained copies, requests, transitions, retrieval, and minimum-duration assumptions, and must be labeled as modeled projections.
 
-The project is delivered in five sequential phases. Each is independently testable and is complete only when its exit criteria are met.
+Deferred work includes Grafana, rich policy administration, bulk folder operations, cost estimation, larger logical experiments, multi-worker scaling, real AWS integration, enterprise identity, and separately justified recommendation-only ML. Kubernetes, a custom frontend, and multi-region replication are outside the core scope.
 
-| Phase | Deliverable | Status |
-| :--- | :--- | :--- |
-| **1 — Foundation** | Containerized stack, schema, migrations, CI | **Complete** |
-| **2 — Control Plane** | Presigned upload/download, checksum verification, sweeps | Planned |
-| **3 — Async Core** | Archive/restore jobs, state machine, idempotency, IR fast path, slow path | Planned |
-| **4 — Intelligence** | Policy engine, simulation, synthetic seeder | Planned |
-| **5 — Scale & Admin** | Folder fan-out, enforcement modes, beat tasks, admin auth, metrics | Planned |
-
-Full detail, deliverables, and exit criteria live in `PLAN.md`.
-
----
-
-## Observability (minimal)
-
-Metrics: `operations_total`, `operation_retries_total`, `checksum_failures_total`, `policy_recommendations_total`, `folder_job_objects_total`, `restore_verified_total`, `storage_class_transitions_total`.
-Structured logs: `service, object_id, job_id, correlation_id, state, event, attempt, error`.
-
----
-
-## Definition of Success
-
-See `PLAN.md` §13. Highlights:
-
-- [ ] Compose stack healthy; readiness reports DB + Redis ok.
-- [ ] Presigned uploads with checksum conditions; zero payload through API.
-- [ ] Server-side transitions; zero payload through worker.
-- [ ] GLACIER_IR objects downloadable while archived and restorable in seconds.
-- [ ] Idempotency via unique index; replays safe.
-- [ ] Policy engine explains every recommendation; simulation writes nothing.
-- [ ] Folder fan-out recomputes aggregates; partial failure tolerated.
-- [ ] Enforcement modes enforce single-writer ownership.
-- [ ] Tests and CI green.
-
----
+Use synthetic/public material only. Owner metadata is not authorization, and the service must not be exposed to untrusted users without authentication and object-level access controls. Neither production readiness nor cross-system atomicity is claimed.
 
 ## License
 
