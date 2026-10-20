@@ -10,6 +10,8 @@
 
 Manage synthetic engineering-style objects using business metadata such as workflow completion, application access, legal hold, and retention requirements. PostgreSQL stores searchable metadata and durable intent; S3-compatible storage holds object bytes.
 
+**Storage direction:** Use MinIO for the local MVP, integration tests, and demonstrations. A future production-ready version should use **Amazon S3 for globally accessed, terabyte-scale object data**. This is a deployment target, not a claim of demonstrated production readiness or physically tested scale.
+
 Native storage lifecycle rules remain useful for storage-level conditions. This project investigates decisions that require application metadata and explicit recovery across independent systems. It does not claim that a custom control plane is always preferable.
 
 **Central question:** Under what workload and failure conditions does an application-aware metadata control plane justify its additional consistency and operational overhead?
@@ -45,8 +47,21 @@ The first two hypotheses define the core project. Cost modeling is a later exten
 - Grafana dashboard and broader operational metrics.
 - Configurable cost estimator and 5 TB, 10 TB, and 20 TB logical scenarios.
 - Larger metadata-only experiments, including optional 1M and 10M rows.
-- Multi-worker scaling, real Amazon S3, enterprise identity, and infrastructure as code.
+- Production deployment on Amazon S3, multi-worker scaling, enterprise identity, and infrastructure as code.
 - Recommendation-only ML, only with a dataset, baseline, and a separate justification.
+
+### Production storage roadmap after the core release
+
+MinIO remains the backend for Milestones 1-4. After their exit criteria pass, target Amazon S3 as the managed storage backend for a production deployment serving globally distributed users and terabyte-scale datasets. Do not expand the MVP into a multi-cloud abstraction or treat S3-compatible APIs as proof of identical behavior.
+
+Before declaring that deployment production-ready:
+
+- Select AWS regions and document data residency, access latency, recovery objectives, and any replication requirements. S3 buckets are regional; global access does not imply automatic cross-region replication or a globally distributed control plane. Multi-region deployment remains a separate post-MVP decision.
+- Establish authentication and object-level authorization, least-privilege IAM roles, private bucket access, encryption/key management, audit visibility, and storage permissions that preserve immutable object ownership.
+- Run the ingestion, archive/restore, idempotency, and failure-recovery contracts against real S3. Validate signed requests, multipart uploads/copies, checksums, pagination, throttling/timeouts, and any enabled versioning or retention behavior. Do not assume MinIO tests cover AWS-specific semantics.
+- Choose S3 storage classes based on access and retention requirements. Validate retrieval availability, restoration behavior, minimum-duration charges, and ownership of lifecycle rules before enabling archival classes; two local buckets do not emulate Glacier semantics.
+- Measure catalog/query performance, worker and reconciliation throughput, recovery behavior, and request/data-transfer/storage costs under representative workloads. S3 storage capacity does not establish the scalability of the PostgreSQL catalog or single-worker control plane. Label projected capacity separately from physically exercised bytes.
+- Document deployment, monitoring/alerting, metadata backup and recovery, verified data migration, and rollback procedures. Preserve the no-last-verified-copy-deletion invariant during migration.
 
 ### Not claimed by this project
 
@@ -263,6 +278,8 @@ Deliver a seeded workload generator, fair discovery benchmark, query plans, repe
 **Exit evidence:** A new user can reproduce the core demonstration and a modest-scale experiment from a clean checkout. The report answers the first two engineering hypotheses, quantifies overhead, separates logical from physical scale, and documents tested design assumptions, including any that failed or remained unsupported. Do not invent a design-change story if none occurred.
 
 Completion of Milestones 1-4 is the core release. Only then consider the deferred roadmap.
+
+Amazon S3 production deployment is a subsequent phase governed by the storage readiness gates in Section 2, not a requirement for MVP completion. Keep the MVP demonstrations and production-scale evidence separately labeled.
 
 ## 9. Experimental Method
 

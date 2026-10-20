@@ -4,6 +4,8 @@ A production-inspired reference project for application-aware object lifecycle g
 
 **The control plane decides. Object storage executes. The reconciler verifies.**
 
+**Storage direction:** The MVP is designed to use MinIO for local development, integration tests, and demonstrations. A future production-ready version should use **Amazon S3 for globally accessed, terabyte-scale object data**.
+
 **Current status: foundation only.** The repository contains infrastructure, models, migrations, a Celery bootstrap, and foundation tests. Upload, policy evaluation, archive/restore, reconciliation, and benchmarks are planned, not demonstrated capabilities. This is not a production-ready service.
 
 The broader scope and exit criteria are in [PLAN.md](PLAN.md). The Redis Pub/Sub design below supersedes that document's older broker-specific messaging descriptions; the plan and runtime implementation have not yet been migrated to this revision.
@@ -43,6 +45,12 @@ Negative results and limitations belong in the report. Cost modeling is a deferr
 | Evidence | Configuration, enum/state-transition, and health test files | Real-service integration tests, recovery matrix, reproducible discovery benchmark |
 
 The target retains Redis and adds MinIO. Redis Pub/Sub carries ephemeral operation-ID notifications, while PostgreSQL stores durable work, attempts, retry deadlines, and failures. A subscriber and an independent bounded database poller feed one execution worker. This is a planned execution adapter, not Celery's existing Redis queue transport; the current Celery bootstrap does not implement it.
+
+### Storage deployment roadmap
+
+- **MVP:** MinIO provides a reproducible local S3-compatible environment with staging, active, and archive locations. The architecture chart and GIF illustrate this MVP layout.
+- **Production target:** Amazon S3 provides the managed object-storage backend for globally distributed users and terabyte-scale datasets. S3 buckets are regional; region selection, data residency, cross-region replication, disaster recovery, and global access latency require explicit design. Replication is not automatic, and multi-region deployment remains outside the MVP.
+- **Readiness gate:** Adopting S3 alone does not make the application production-ready. Require authentication and object-level authorization, least-privilege IAM, encryption, real-S3 integration and recovery tests, multipart transfer validation, operational monitoring, and measured control-plane throughput, recovery behavior, and storage/request/data-transfer costs. See the [production storage roadmap](PLAN.md#production-storage-roadmap-after-the-core-release).
 
 ## Target Architecture
 
@@ -222,7 +230,7 @@ Begin with 100K logical catalog rows and a separately declared practical populat
 
 Two MinIO buckets demonstrate lifecycle orchestration, not Glacier retrieval behavior or actual archival pricing. Optional economic scenarios must include retained copies, requests, transitions, retrieval, and minimum-duration assumptions, and must be labeled as modeled projections.
 
-Deferred work includes Grafana, rich policy administration, bulk folder operations, cost estimation, larger logical experiments, multi-worker scaling, real AWS integration, enterprise identity, and separately justified recommendation-only ML. Kubernetes, a custom frontend, and multi-region replication are outside the core scope.
+Deferred work includes Grafana, rich policy administration, bulk folder operations, cost estimation, larger logical experiments, multi-worker scaling, the production Amazon S3 deployment, enterprise identity, and separately justified recommendation-only ML. Kubernetes, a custom frontend, and multi-region replication are outside the core scope. Terabyte-scale storage and global access are production design targets, not measured capabilities of this MVP.
 
 Use synthetic/public material only. Owner metadata is not authorization, and the service must not be exposed to untrusted users without authentication and object-level access controls. Neither production readiness nor cross-system atomicity is claimed.
 
