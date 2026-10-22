@@ -1,5 +1,90 @@
 # Smart Data Control Plane
 
+## The Bigger Picture: Compute Ends. The Data Lifecycle Continues.
+
+A scientific computation does not end when a process exits. Inputs must reach the execution environment, results must return to the engineer, and the resulting data must remain discoverable and manageable after the compute resources are no longer needed.
+
+This repository explores that final responsibility within a broader scientific-computing portfolio:
+
+- **[HTCondor Distributed Computing MVP](https://github.com/Phat-pham99/HTCondor_concept_MVP)** explores distributed job execution.
+- **Data-Intensive Storage Gateway** explores metadata-driven lifecycle control for the artifacts computation leaves behind.
+
+The motivation comes from professional experience with scientific workloads spanning user environments and heterogeneous compute resources. These projects examine connected concerns: coordinating execution, returning outputs, and managing their subsequent lifecycle.
+
+**The connection is application context, not merely file transfer.** An object's age alone does not explain its continuing usefulness. This gateway investigates how business metadata can inform archival decisions while keeping intended and observed storage states aligned.
+
+The central question is whether finer-grained lifecycle control justifies the consistency, recovery, and operating costs of a separate metadata plane.
+
+These repositories are complementary public demonstrations, not an already integrated platform or a reproduction of an employer's production system.
+
+## Shared Architectural Context
+
+```mermaid
+flowchart TB
+      user_environment["User Environment<br/>Prepare inputs / receive results"]
+
+      subgraph execution["HTCondor execution | conceptual job path"]
+            submit["Submit jobs<br/>schedd queue"]
+            inputs["Deliver inputs<br/>HTCondor file transfer"]
+            execute["Execute job<br/>Selected execution slot"]
+            outputs["Return outputs<br/>Submit-host output area"]
+            autoscaler["Local autoscaler<br/>Docker worker capacity"]
+      end
+
+      subgraph context["Compute pool | motivating production context only"]
+            capacity["On-premises / on-demand / interruptible capacity<br/>Not a claim about demonstrated MVP resources"]
+      end
+
+      subgraph gateway["Storage gateway | planned artifact lifecycle"]
+            catalog["Catalog results<br/>Evaluate lifecycle policy"]
+            staging[("Staging uploads")]
+            active[("Active artifacts")]
+            archive[("Archive artifacts")]
+            lifecycle_worker["Execution worker<br/>DB poll + optional hint"]
+      end
+
+      user_environment -->|Job-submission request| submit
+      submit -->|Schedule execution| execute
+      submit -->|Observe demand| autoscaler
+      autoscaler -->|Manage Docker worker capacity| execute
+      user_environment ==>|Input files| inputs
+      inputs ==>|Input files| execute
+      execute ==>|Result files| outputs
+      outputs -.->|Proposed export before demo cleanup| user_environment
+      user_environment -.->|Proposed client: register metadata| catalog
+      user_environment -.->|Proposed client: upload artifact bytes| staging
+      staging ==>|Verify, promote, verify| active
+      catalog -->|Durable PostgreSQL work; optional Redis hint| lifecycle_worker
+      lifecycle_worker -->|Ownership and verification| active
+      lifecycle_worker -->|Ownership and verification| archive
+      active ==>|Archive: copy and verify before source deletion| archive
+      archive ==>|Restore: copy and verify; retain archive| active
+      active -.->|Short-lived download to proposed client| user_environment
+      capacity -.->|Motivating execution context| execute
+
+      classDef client fill:#F1F5F7,stroke:#536973,color:#172C34
+      classDef control fill:#EAF3FB,stroke:#1767AB,color:#123D60
+      classDef data fill:#E8F6EF,stroke:#087C68,color:#125447
+      classDef contextual fill:#FFF4DC,stroke:#946B12,color:#59400B
+      class user_environment client
+      class submit,execute,autoscaler,catalog,lifecycle_worker control
+      class inputs,outputs,staging,active,archive data
+      class capacity contextual
+      linkStyle 0,1,2,3,8,11,12,13 stroke:#1767AB,stroke-width:2px
+      linkStyle 4,5,6,7,9,10,14,15,16 stroke:#087C68,stroke-width:3px
+      linkStyle 17 stroke:#946B12
+```
+
+> **This diagram illustrates the shared architectural context of two independent public projects. It does not claim demonstrated end-to-end integration or reproduce an employer's production architecture.**
+
+Thin blue arrows represent control messages and metadata; thick green arrows represent object-byte movement. Dashed blue/green paths identify proposed user/export adapters, not an existing cross-project integration. The dotted amber arrow indicates motivating compute context, not a deployed connection or demonstrated compute capacity.
+
+The conceptual journey is **prepare inputs -> submit -> execute -> return results -> catalog -> archive -> restore**. This static diagram defines the portfolio overview. The [optional animated walkthrough](#workflow-walkthrough) follows one synthetic job and artifact through the same components, highlighting one handoff at a time. See the [source review and full text alternative](docs/portfolio-workflow.md) for what is code-based, proposed, and planned.
+
+The HTCondor demo returns small JSON outputs to its submit host and removes its output volume during cleanup. Exporting results before that cleanup and handing them to the gateway are **proposed**, not implemented adapters. The animation uses a synthetic 2 MiB artifact and an explicit 180-day time jump so it does not imply that the demo's tiny JSON output satisfies the planned archive policy.
+
+## Gateway Scope
+
 A production-inspired reference project for application-aware object lifecycle governance. The target system uses PostgreSQL to store searchable business metadata and durable intent, executes archive and restore operations against S3-compatible storage, and reconciles catalog state with actual object bytes.
 
 **The control plane decides. Object storage executes. The reconciler verifies.**
@@ -10,14 +95,7 @@ A production-inspired reference project for application-aware object lifecycle g
 
 The broader scope and exit criteria are in [PLAN.md](PLAN.md). The Redis Pub/Sub design below supersedes that document's older broker-specific messaging descriptions; the plan and runtime implementation have not yet been migrated to this revision.
 
-## Animated Workflow
-
-![Fourteen-step planned workflow showing verified ingestion, policy evaluation, durable database intent, Redis Pub/Sub notifications with database polling, archive, duplicate notification handling, restore, drift detection, and safe repair.](docs/assets/lifecycle-workflow.gif)
-
-This 49-second looping illustration shows the **planned design**, not a recording of implemented behavior. Blue paths carry control and metadata; green paths carry object bytes. The state strip distinguishes desired placement from the last verified observed placement.
-
-For a non-animated description, see the [updated reliability guarantees](#planned-reliability-guarantees-and-limits) below and the storage [failure evidence](PLAN.md#7-reconciliation-and-failure-evidence). Redis Pub/Sub is only a wake-up mechanism; PostgreSQL polling recovers work when notifications are lost.
-
+[Setup](#run-the-existing-foundation) | [API status](#api-status) | [Checks](#development-and-checks) | [Evidence and limitations](#evidence-and-limitations)
 
 ## Problem and Evaluation
 
@@ -52,11 +130,14 @@ The target retains Redis and adds MinIO. Redis Pub/Sub carries ephemeral operati
 - **Production target:** Amazon S3 provides the managed object-storage backend for globally distributed users and terabyte-scale datasets. S3 buckets are regional; region selection, data residency, cross-region replication, disaster recovery, and global access latency require explicit design. Replication is not automatic, and multi-region deployment remains outside the MVP.
 - **Readiness gate:** Adopting S3 alone does not make the application production-ready. Require authentication and object-level authorization, least-privilege IAM, encryption, real-S3 integration and recovery tests, multipart transfer validation, operational monitoring, and measured control-plane throughput, recovery behavior, and storage/request/data-transfer costs. See the [production storage roadmap](PLAN.md#production-storage-roadmap-after-the-core-release).
 
+<details>
+<summary>Gateway target architecture and reliability (planned)</summary>
+
 ## Target Architecture
 
 ```mermaid
 flowchart TB
-      client["Client / Demo CLI"]
+      client["User Environment<br/>Returned artifact / Demo CLI"]
 
       subgraph control["DECIDE | Control plane"]
             api["FastAPI<br/>Validate requests - discover objects - expose status"]
@@ -137,6 +218,8 @@ Storage-to-storage arrows summarize service-controlled transfers: destination by
 - Record discrepancies and repair only evidence-backed, authorized cases. Destructive ambiguity requires manual review.
 
 Worker timeout alone does not establish exclusive ownership. The core assumes controlled single-worker restart, settled in-flight requests, and bounded storage timeouts. Database polling must not blindly reclaim running work after a timeout; uncertain ownership requires controlled recovery. The storage and ownership rules in the [reliability contract](PLAN.md#4-reliability-contract) still apply, but its older broker-confirmation and dead-letter provisions do not describe this Pub/Sub revision.
+
+</details>
 
 ## Run the Existing Foundation
 
@@ -233,6 +316,34 @@ Two MinIO buckets demonstrate lifecycle orchestration, not Glacier retrieval beh
 Deferred work includes Grafana, rich policy administration, bulk folder operations, cost estimation, larger logical experiments, multi-worker scaling, the production Amazon S3 deployment, enterprise identity, and separately justified recommendation-only ML. Kubernetes, a custom frontend, and multi-region replication are outside the core scope. Terabyte-scale storage and global access are production design targets, not measured capabilities of this MVP.
 
 Use synthetic/public material only. Owner metadata is not authorization, and the service must not be exposed to untrusted users without authentication and object-level access controls. Neither production readiness nor cross-system atomicity is claimed.
+
+## Workflow Walkthrough
+
+<details>
+<summary>Conceptual workflow animation: one job and its artifacts</summary>
+
+![Conceptual 20-step workflow: prepare and submit a synthetic job, observe local Docker capacity, transfer inputs, execute, return outputs, propose export before cleanup, ingest through staging, verify and catalog, evaluate policy after a time jump, persist work, archive only after verification, restore while retaining the archive, and download the same artifact.](docs/assets/portfolio-workflow.gif)
+
+**Conceptual workflow animation, not a live demo.** The 80-second loop follows one synthetic 2 MiB artifact at version 1. Blue paths carry control/metadata; green paths carry bytes; dashed paths mark proposed handoffs. One path is animated at a time. Scene labels distinguish HTCondor mechanisms, proposed handoffs, and gateway design, while the state strip keeps desired and observed placement separate.
+
+[Open GIF](docs/assets/portfolio-workflow.gif) | [Static poster](docs/assets/portfolio-workflow.png) | [Text alternative, source evidence, and regeneration](docs/portfolio-workflow.md)
+
+</details>
+
+<details>
+<summary>Gateway zoom-in: the same returned artifact (conceptual)</summary>
+
+**Conceptual workflow animation: gateway zoom-in.** Continue the same completed job 017 and synthetic 2 MiB artifact v1 from the big picture. A User Environment preserves returned results before the HTCondor demo's cleanup; that export and gateway handoff remain proposed, not implemented integration. The animation then focuses on ingestion, policy, durable work, archive, restore, and later reconciliation design.
+
+![Twenty-step conceptual gateway zoom-in following the same completed job and artifact through proposed result preservation, ingestion, verification, policy timing, durable intent, Redis wake-ups with independent database polling, verified archive and retained-copy restore, download, drift detection and evidence-backed repair.](docs/assets/lifecycle-workflow.gif)
+
+The 80-second loop shares the portfolio animation's typography, colors and artifact identity. It highlights one handoff at a time: blue for control/metadata and green for bytes. The compute job stays complete while artifact lifecycle, desired placement and observed placement change independently. Archive verification precedes source deletion; restore retains the archive. Missing serving bytes produce uncertainty, not invented success. Reconciliation and repair are planned later work, not a demonstrated running service.
+
+[Open GIF](docs/assets/lifecycle-workflow.gif) | [Static poster](docs/assets/lifecycle-workflow.png) | [Text alternative and regeneration](docs/portfolio-workflow.md#gateway-zoom-in-text-alternative)
+
+For the static gateway detail, expand the target architecture section above and see the [planned reliability guarantees](#planned-reliability-guarantees-and-limits) and [failure evidence requirements](PLAN.md#7-reconciliation-and-failure-evidence).
+
+</details>
 
 ## License
 
